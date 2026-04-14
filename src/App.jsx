@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
+import { db, ref, set, onValue } from "./firebase";
 
-const TM = {
+// ─── Teams ──────────────────────────────────────────────────────────────
+const T = {
   OKC: { n: "Thunder", c: "OKC", s: 1, color: "#007AC1", bg: "#002D62" },
   SAS: { n: "Spurs", c: "SAN", s: 2, color: "#C4CED4", bg: "#000000" },
   DEN: { n: "Nuggets", c: "DEN", s: 3, color: "#FEC524", bg: "#0E2240" },
@@ -33,6 +35,7 @@ const R1 = {
     { id: "E4", teams: ["NYK", "PHI"] },
   ],
 };
+
 const TREE = {
   W5: { p: ["W1", "W2"], r: 2 },
   W6: { p: ["W3", "W4"], r: 2 },
@@ -42,6 +45,7 @@ const TREE = {
   E7: { p: ["E5", "E6"], r: 3 },
   F: { p: ["W7", "E7"], r: 4 },
 };
+
 const R1_IDS = ["W1", "W2", "W3", "W4", "E1", "E2", "E3", "E4"];
 const ALL_IDS = [...R1_IDS, ...Object.keys(TREE)];
 const PTS = { 1: 10, 2: 20, 3: 40, 4: 80 };
@@ -53,19 +57,20 @@ const RNAME = {
 };
 const LOCK = new Date("2026-04-18T16:00:00Z");
 const MAX_P = 6;
-const PFX = "nba26";
 
 function getRound(id) {
   return R1_IDS.includes(id) ? 1 : TREE[id]?.r || 4;
 }
+
 function getTeams(id, picks) {
   if (R1_IDS.includes(id)) {
-    const c = id[0] === "W" ? "west" : "east";
-    return R1[c].find((m) => m.id === id).teams;
+    const conf = id[0] === "W" ? "west" : "east";
+    return R1[conf].find((m) => m.id === id).teams;
   }
-  const nd = TREE[id];
-  return nd ? nd.p.map((p) => picks[p] || null) : [null, null];
+  const node = TREE[id];
+  return node ? node.p.map((p) => picks[p] || null) : [null, null];
 }
+
 function getDesc(id) {
   const d = [];
   for (const [k, v] of Object.entries(TREE)) {
@@ -76,7 +81,8 @@ function getDesc(id) {
   }
   return d;
 }
-function calcScore(picks, res) {
+
+function score(picks, res) {
   let t = 0;
   for (const id of ALL_IDS) {
     if (picks[id] && res[id] && picks[id] === res[id]) {
@@ -91,7 +97,8 @@ function calcScore(picks, res) {
   }
   return t;
 }
-function bdown(picks, res) {
+
+function breakdown(picks, res) {
   const b = {
     1: { c: 0, t: 0, g: 0 },
     2: { c: 0, t: 0, g: 0 },
@@ -116,8 +123,9 @@ function bdown(picks, res) {
   return b;
 }
 
+// ─── App ────────────────────────────────────────────────────────────────
 export default function App() {
-  const [me, setMe] = useState(null);
+  const [me, setMe] = useState(() => localStorage.getItem("nba26_me") || null);
   const [players, setPlayers] = useState([]);
   const [brackets, setBrackets] = useState({});
   const [results, setResults] = useState({});
@@ -129,39 +137,37 @@ export default function App() {
   const locked = new Date() >= LOCK;
 
   useEffect(() => {
-    (async () => {
-      try {
-        const pR = await window.storage.get(`${PFX}:players`);
-        const p = pR ? JSON.parse(pR.value) : [];
-        setPlayers(p);
-        const rR = await window.storage.get(`${PFX}:results`);
-        setResults(rR ? JSON.parse(rR.value) : {});
-        const br = {};
-        for (const n of p) {
-          try {
-            const b = await window.storage.get(`${PFX}:b:${n}`);
-            if (b) br[n] = JSON.parse(b.value);
-          } catch {}
-        }
-        setBrackets(br);
-      } catch {}
-      setLoading(false);
-    })();
+    const u = [];
+    u.push(
+      onValue(ref(db, "players"), (s) => {
+        const v = s.val();
+        const list = v ? Object.keys(v) : [];
+        setPlayers(list);
+        const saved = localStorage.getItem("nba26_me");
+        if (saved && list.includes(saved)) setViewing((p) => p || saved);
+        setLoading(false);
+      }),
+    );
+    u.push(onValue(ref(db, "results"), (s) => setResults(s.val() || {})));
+    u.push(onValue(ref(db, "brackets"), (s) => setBrackets(s.val() || {})));
+    return () => u.forEach((fn) => fn());
   }, []);
 
   async function join(name) {
     const n = name.trim();
     if (!n || players.includes(n) || players.length >= MAX_P) return;
-    const up = [...players, n];
-    setPlayers(up);
-    setMe(n);
-    setViewing(n);
-    await window.storage.set(`${PFX}:players`, JSON.stringify(up));
-  }
-  function select(n) {
+    await set(ref(db, `players/${n}`), true);
+    localStorage.setItem("nba26_me", n);
     setMe(n);
     setViewing(n);
   }
+
+  function select(name) {
+    localStorage.setItem("nba26_me", name);
+    setMe(name);
+    setViewing(name);
+  }
+
   async function pick(id, team) {
     if (locked || viewing !== me) return;
     const b = { ...(brackets[me] || {}) };
@@ -173,16 +179,16 @@ export default function App() {
         delete b[d + "_g"];
       }
     }
-    setBrackets((p) => ({ ...p, [me]: b }));
-    await window.storage.set(`${PFX}:b:${me}`, JSON.stringify(b));
+    await set(ref(db, `brackets/${me}`), b);
   }
-  async function pickG(id, g) {
+
+  async function pickGames(id, g) {
     if (locked || viewing !== me) return;
     const b = { ...(brackets[me] || {}) };
     b[id + "_g"] = g;
-    setBrackets((p) => ({ ...p, [me]: b }));
-    await window.storage.set(`${PFX}:b:${me}`, JSON.stringify(b));
+    await set(ref(db, `brackets/${me}`), b);
   }
+
   async function setRes(id, team) {
     const r = { ...results, [id]: team };
     for (const d of getDesc(id)) {
@@ -192,28 +198,31 @@ export default function App() {
         delete r[d + "_g"];
       }
     }
-    setResults(r);
-    await window.storage.set(`${PFX}:results`, JSON.stringify(r));
+    await set(ref(db, "results"), r);
   }
-  async function setResG(id, g) {
+
+  async function setResGames(id, g) {
     const r = { ...results, [id + "_g"]: g };
-    setResults(r);
-    await window.storage.set(`${PFX}:results`, JSON.stringify(r));
+    await set(ref(db, "results"), r);
   }
 
   if (loading)
     return (
       <div style={S.loadWrap}>
+        <link
+          href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&display=swap"
+          rel="stylesheet"
+        />
         <div style={S.spinner} />
         <p style={{ color: "#666", marginTop: 16, fontFamily: "'Oswald'" }}>
-          Loading...
+          Connecting...
         </p>
       </div>
     );
 
-  if (!me)
+  if (!me || !players.includes(me))
     return (
-      <LoginScreen
+      <Login
         players={players}
         onJoin={join}
         onSelect={select}
@@ -223,39 +232,29 @@ export default function App() {
       />
     );
 
-  const ap = admin ? results : brackets[viewing] || {};
-  const isOwn = viewing === me,
-    canEdit = isOwn && !locked;
+  const activePicks = admin ? results : brackets[viewing] || {};
+  const isOwn = viewing === me;
+  const canEdit = isOwn && !locked;
 
   return (
     <div style={S.app}>
-      <Hdr
+      <link
+        href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&display=swap"
+        rel="stylesheet"
+      />
+      <Header
         me={me}
         onLogout={() => {
+          localStorage.removeItem("nba26_me");
           setMe(null);
           setViewing(null);
         }}
         locked={locked}
       />
-      <div style={S.tabBar}>
-        {["bracket", "scoreboard"].map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            style={{
-              ...S.tabBtn,
-              ...(tab === t
-                ? { color: "#E56020", borderBottomColor: "#E56020" }
-                : {}),
-            }}
-          >
-            {t.toUpperCase()}
-          </button>
-        ))}
-      </div>
+      <TabBar tab={tab} setTab={setTab} />
       {tab === "bracket" ? (
-        <div style={S.bWrap}>
-          <Ctrl
+        <div style={S.bracketWrap}>
+          <Controls
             players={players}
             viewing={viewing}
             setViewing={setViewing}
@@ -264,42 +263,52 @@ export default function App() {
             isOwn={isOwn}
             canEdit={canEdit}
           />
-          <ConfB
+          <ConfBracket
             conf="west"
             label="WESTERN CONFERENCE"
-            picks={ap}
+            picks={activePicks}
             results={results}
             onPick={admin ? setRes : canEdit ? pick : null}
-            onG={admin ? setResG : canEdit ? pickG : null}
+            onGames={admin ? setResGames : canEdit ? pickGames : null}
             showRes={!admin}
           />
-          <ConfB
+          <ConfBracket
             conf="east"
             label="EASTERN CONFERENCE"
-            picks={ap}
+            picks={activePicks}
             results={results}
             onPick={admin ? setRes : canEdit ? pick : null}
-            onG={admin ? setResG : canEdit ? pickG : null}
+            onGames={admin ? setResGames : canEdit ? pickGames : null}
             showRes={!admin}
           />
-          <FinalsS
-            picks={ap}
+          <FinalsSection
+            picks={activePicks}
             results={results}
             onPick={admin ? setRes : canEdit ? pick : null}
-            onG={admin ? setResG : canEdit ? pickG : null}
+            onGames={admin ? setResGames : canEdit ? pickGames : null}
             showRes={!admin}
           />
         </div>
       ) : (
-        <SB players={players} brackets={brackets} results={results} me={me} />
+        <Scoreboard
+          players={players}
+          brackets={brackets}
+          results={results}
+          me={me}
+        />
       )}
     </div>
   );
 }
 
-function LoginScreen({ players, onJoin, onSelect, name, setName, locked }) {
+// ─── Login ──────────────────────────────────────────────────────────────
+function Login({ players, onJoin, onSelect, name, setName, locked }) {
   return (
     <div style={S.loginWrap}>
+      <link
+        href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&display=swap"
+        rel="stylesheet"
+      />
       <div style={S.loginCard}>
         <div style={{ textAlign: "center", marginBottom: 20 }}>
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
@@ -335,7 +344,7 @@ function LoginScreen({ players, onJoin, onSelect, name, setName, locked }) {
             <p style={S.label}>SELECT YOUR NAME</p>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {players.map((p) => (
-                <button key={p} onClick={() => onSelect(p)} style={S.pBtn}>
+                <button key={p} onClick={() => onSelect(p)} style={S.playerBtn}>
                   <span style={S.avatar}>{p[0].toUpperCase()}</span>
                   <span style={{ fontWeight: 500 }}>{p}</span>
                 </button>
@@ -345,7 +354,9 @@ function LoginScreen({ players, onJoin, onSelect, name, setName, locked }) {
         )}
         {!locked && players.length < MAX_P && (
           <div>
-            <p style={S.label}>NEW PLAYER ({MAX_P - players.length} spots)</p>
+            <p style={S.label}>
+              NEW PLAYER ({MAX_P - players.length} spots left)
+            </p>
             <div style={{ display: "flex", gap: 8 }}>
               <input
                 style={S.input}
@@ -373,6 +384,18 @@ function LoginScreen({ players, onJoin, onSelect, name, setName, locked }) {
             </div>
           </div>
         )}
+        {locked && players.length < MAX_P && (
+          <p
+            style={{
+              color: "#E56020",
+              fontSize: 13,
+              textAlign: "center",
+              marginTop: 12,
+            }}
+          >
+            Brackets are locked — no new players.
+          </p>
+        )}
         <div style={S.lockNotice}>
           {locked ? (
             <span style={{ color: "#E56020" }}>BRACKETS LOCKED</span>
@@ -385,7 +408,8 @@ function LoginScreen({ players, onJoin, onSelect, name, setName, locked }) {
   );
 }
 
-function Hdr({ me, onLogout, locked }) {
+// ─── Chrome ─────────────────────────────────────────────────────────────
+function Header({ me, onLogout, locked }) {
   return (
     <div style={S.header}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -403,7 +427,28 @@ function Hdr({ me, onLogout, locked }) {
   );
 }
 
-function Ctrl({
+function TabBar({ tab, setTab }) {
+  return (
+    <div style={S.tabBar}>
+      {["bracket", "scoreboard"].map((t) => (
+        <button
+          key={t}
+          onClick={() => setTab(t)}
+          style={{
+            ...S.tabBtn,
+            ...(tab === t
+              ? { color: "#E56020", borderBottomColor: "#E56020" }
+              : {}),
+          }}
+        >
+          {t.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Controls({
   players,
   viewing,
   setViewing,
@@ -442,9 +487,19 @@ function Ctrl({
   );
 }
 
-function ConfB({ conf, label, picks, results, onPick, onG, showRes }) {
-  const pfx = conf === "west" ? "W" : "E",
-    cfId = `${pfx}7`;
+// ─── Bracket Layout ─────────────────────────────────────────────────────
+
+function ConfBracket({
+  conf,
+  label,
+  picks,
+  results,
+  onPick,
+  onGames,
+  showRes,
+}) {
+  const pfx = conf === "west" ? "W" : "E";
+  const cfId = `${pfx}7`;
   return (
     <div style={{ marginBottom: 32 }}>
       <h3
@@ -463,12 +518,12 @@ function ConfB({ conf, label, picks, results, onPick, onG, showRes }) {
         ))}
       </div>
       <div style={{ overflowX: "auto", paddingBottom: 8 }}>
-        <BNode
+        <BracketNode
           id={cfId}
           picks={picks}
           results={results}
           onPick={onPick}
-          onG={onG}
+          onGames={onGames}
           showRes={showRes}
         />
       </div>
@@ -476,46 +531,52 @@ function ConfB({ conf, label, picks, results, onPick, onG, showRes }) {
   );
 }
 
-function BNode({ id, picks, results, onPick, onG, showRes }) {
+function BracketNode({ id, picks, results, onPick, onGames, showRes }) {
   const round = getRound(id);
-  if (round === 1)
+
+  if (round === 1) {
     return (
       <div style={{ padding: "5px 0" }}>
-        <MC
+        <MCard
           id={id}
           picks={picks}
           results={results}
           onPick={onPick}
-          onG={onG}
+          onGames={onGames}
           showRes={showRes}
         />
       </div>
     );
+  }
+
   const [pA, pB] = TREE[id].p;
+
   return (
     <div style={{ display: "flex", alignItems: "stretch" }}>
+      {/* Children */}
       <div style={{ display: "flex", flexDirection: "column" }}>
         <div style={{ flex: 1, display: "flex", alignItems: "center" }}>
-          <BNode
+          <BracketNode
             id={pA}
             picks={picks}
             results={results}
             onPick={onPick}
-            onG={onG}
+            onGames={onGames}
             showRes={showRes}
           />
         </div>
         <div style={{ flex: 1, display: "flex", alignItems: "center" }}>
-          <BNode
+          <BracketNode
             id={pB}
             picks={picks}
             results={results}
             onPick={onPick}
-            onG={onG}
+            onGames={onGames}
             showRes={showRes}
           />
         </div>
       </div>
+      {/* Connector lines */}
       <div
         style={{
           display: "flex",
@@ -539,14 +600,15 @@ function BNode({ id, picks, results, onPick, onG, showRes }) {
           }}
         />
       </div>
+      {/* Line to current + card */}
       <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
         <div style={{ width: 12, height: 2, background: "#2a2a3e" }} />
-        <MC
+        <MCard
           id={id}
           picks={picks}
           results={results}
           onPick={onPick}
-          onG={onG}
+          onGames={onGames}
           showRes={showRes}
         />
       </div>
@@ -554,8 +616,8 @@ function BNode({ id, picks, results, onPick, onG, showRes }) {
   );
 }
 
-function FinalsS({ picks, results, onPick, onG, showRes }) {
-  const ch = picks["F"];
+function FinalsSection({ picks, results, onPick, onGames, showRes }) {
+  const champ = picks["F"];
   return (
     <div
       style={{
@@ -571,16 +633,17 @@ function FinalsS({ picks, results, onPick, onG, showRes }) {
         </span>
       </div>
       <div style={{ display: "flex", justifyContent: "center" }}>
-        <MC
+        <MCard
           id="F"
           picks={picks}
           results={results}
           onPick={onPick}
-          onG={onG}
+          onGames={onGames}
           showRes={showRes}
+          finals
         />
       </div>
-      {ch && TM[ch] && (
+      {champ && T[champ] && (
         <div style={{ textAlign: "center", marginTop: 16 }}>
           <span
             style={{
@@ -600,18 +663,18 @@ function FinalsS({ picks, results, onPick, onG, showRes }) {
               padding: "12px 28px",
               borderRadius: 8,
               border: "2px solid #FEC524",
-              background: TM[ch].bg,
+              background: T[champ].bg,
             }}
           >
             <span
               style={{
-                color: TM[ch].color,
+                color: T[champ].color,
                 fontFamily: "'Oswald'",
                 fontWeight: 700,
                 fontSize: 20,
               }}
             >
-              {TM[ch].c} {TM[ch].n}
+              {T[champ].c} {T[champ].n}
             </span>
           </div>
         </div>
@@ -620,15 +683,20 @@ function FinalsS({ picks, results, onPick, onG, showRes }) {
   );
 }
 
-function MC({ id, picks, results, onPick, onG, showRes }) {
-  const [t1, t2] = getTeams(id, picks),
-    picked = picks[id],
-    pickedG = picks[id + "_g"],
-    actual = results[id],
-    actualG = results[id + "_g"],
-    click = !!onPick;
+// ─── Matchup Card ───────────────────────────────────────────────────────
+
+function MCard({ id, picks, results, onPick, onGames, showRes, finals }) {
+  const [t1, t2] = getTeams(id, picks);
+  const picked = picks[id];
+  const pickedG = picks[id + "_g"];
+  const actual = results[id];
+  const actualG = results[id + "_g"];
+  const clickable = !!onPick;
+
   return (
-    <div style={S.card}>
+    <div
+      style={{ ...S.card, ...(finals ? { border: "2px solid #E56020" } : {}) }}
+    >
       {[t1, t2].map((tk, i) => {
         if (!tk)
           return (
@@ -646,21 +714,21 @@ function MC({ id, picks, results, onPick, onG, showRes }) {
               </span>
             </div>
           );
-        const tm = TM[tk],
-          isPick = picked === tk,
-          correct = showRes && actual && picked === tk && actual === tk,
-          wrong = showRes && actual && picked === tk && actual !== tk,
-          actualW = showRes && actual === tk;
+        const tm = T[tk];
+        const isPick = picked === tk;
+        const correct = showRes && actual && picked === tk && actual === tk;
+        const wrong = showRes && actual && picked === tk && actual !== tk;
+        const actualW = showRes && actual === tk;
         return (
           <div
             key={i}
-            onClick={() => click && onPick(id, tk)}
+            onClick={() => clickable && onPick(id, tk)}
             style={{
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
               padding: "7px 10px",
-              cursor: click ? "pointer" : "default",
+              cursor: clickable ? "pointer" : "default",
               background: isPick ? tm.bg : "transparent",
               borderBottom: i === 0 ? "1px solid #1e1e30" : "none",
               transition: "background 0.15s",
@@ -715,8 +783,9 @@ function MC({ id, picks, results, onPick, onG, showRes }) {
           </div>
         );
       })}
+      {/* Games selector - shown when a winner is picked */}
       {picked && (
-        <div style={S.gRow}>
+        <div style={S.gamesRow}>
           <span
             style={{
               fontSize: 10,
@@ -728,34 +797,34 @@ function MC({ id, picks, results, onPick, onG, showRes }) {
             IN
           </span>
           {[4, 5, 6, 7].map((g) => {
-            const sel = pickedG === g,
-              gC =
-                showRes &&
-                actual &&
-                picked === actual &&
-                actualG === g &&
-                pickedG === g,
-              gW =
-                showRes && actual && actualG && pickedG === g && actualG !== g;
+            const sel = pickedG === g;
+            const gCorrect =
+              showRes &&
+              actual &&
+              picked === actual &&
+              actualG === g &&
+              pickedG === g;
+            const gWrong =
+              showRes && actual && actualG && pickedG === g && actualG !== g;
             return (
               <button
                 key={g}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (click && onG) onG(id, g);
+                  if (clickable && onGames) onGames(id, g);
                 }}
                 style={{
                   ...S.gBtn,
                   background: sel
-                    ? gC
+                    ? gCorrect
                       ? "#166534"
-                      : gW
+                      : gWrong
                         ? "#7f1d1d"
                         : "#E56020"
                     : "transparent",
                   color: sel ? "#fff" : "#666",
                   border: sel ? "1px solid transparent" : "1px solid #2a2a3e",
-                  cursor: click ? "pointer" : "default",
+                  cursor: clickable ? "pointer" : "default",
                 }}
               >
                 {g}
@@ -794,20 +863,24 @@ function MC({ id, picks, results, onPick, onG, showRes }) {
   );
 }
 
-function SB({ players, brackets, results, me }) {
+// ─── Scoreboard ─────────────────────────────────────────────────────────
+
+function Scoreboard({ players, brackets, results, me }) {
   const hasRes =
     Object.keys(results).filter((k) => !k.includes("_")).length > 0;
   const sorted = [...players].sort(
     (a, b) =>
-      calcScore(brackets[b] || {}, results) -
-      calcScore(brackets[a] || {}, results),
+      score(brackets[b] || {}, results) - score(brackets[a] || {}, results),
   );
+  const maxBonus = 15 * 5; // 15 series × 5 pts each
+
   return (
     <div style={S.sbWrap}>
       <h2 style={S.sbTitle}>LEADERBOARD</h2>
       {!hasRes && (
         <div style={S.noRes}>
-          No results entered yet. Scores update once an admin enters outcomes.
+          No results entered yet. Scores update live once an admin enters game
+          outcomes.
         </div>
       )}
       <div style={{ borderRadius: 8, overflow: "hidden", marginBottom: 24 }}>
@@ -821,11 +894,11 @@ function SB({ players, brackets, results, me }) {
           <span style={{ ...S.sbCell, flex: 1, color: "#E56020" }}>PTS</span>
         </div>
         {sorted.map((p, i) => {
-          const br = brackets[p] || {},
-            sc = calcScore(br, results),
-            bd = bdown(br, results),
-            pk = Object.keys(br).filter((k) => !k.includes("_")).length,
-            isMe = p === me;
+          const br = brackets[p] || {};
+          const sc = score(br, results);
+          const bd = breakdown(br, results);
+          const picks = Object.keys(br).filter((k) => !k.includes("_")).length;
+          const isMe = p === me;
           return (
             <div
               key={p}
@@ -859,7 +932,7 @@ function SB({ players, brackets, results, me }) {
                 {p}
                 {isMe ? " (you)" : ""}
                 <span style={{ fontSize: 10, color: "#555", marginLeft: 6 }}>
-                  {pk}/15
+                  {picks}/15
                 </span>
               </span>
               {[1, 2, 3, 4].map((r) => (
@@ -944,13 +1017,15 @@ function SB({ players, brackets, results, me }) {
             textAlign: "center",
           }}
         >
-          Max: 315 points (240 winners + 75 games bonuses)
+          Max: {8 * 10 + 4 * 20 + 2 * 40 + 80 + 15 * 5} points (240 winners + 75
+          games bonuses)
         </p>
       </div>
     </div>
   );
 }
 
+// ─── Styles ─────────────────────────────────────────────────────────────
 const S = {
   loadWrap: {
     display: "flex",
@@ -972,7 +1047,7 @@ const S = {
     minHeight: "100vh",
     background: "#0d0d1a",
     color: "#eee",
-    fontFamily: "'Source Sans 3',sans-serif",
+    fontFamily: "'Source Sans 3', sans-serif",
   },
   loginWrap: {
     minHeight: "100vh",
@@ -1023,7 +1098,7 @@ const S = {
     marginBottom: 10,
     fontFamily: "'Oswald'",
   },
-  pBtn: {
+  playerBtn: {
     display: "flex",
     alignItems: "center",
     gap: 12,
@@ -1148,7 +1223,7 @@ const S = {
     letterSpacing: 3,
     cursor: "pointer",
   },
-  bWrap: { padding: "12px 16px 40px", maxWidth: 900, margin: "0 auto" },
+  bracketWrap: { padding: "12px 16px 40px", maxWidth: 900, margin: "0 auto" },
   controls: {
     display: "flex",
     alignItems: "center",
@@ -1228,7 +1303,7 @@ const S = {
     overflow: "hidden",
     flexShrink: 0,
   },
-  gRow: {
+  gamesRow: {
     display: "flex",
     alignItems: "center",
     gap: 4,
